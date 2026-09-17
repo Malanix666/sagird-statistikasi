@@ -105,22 +105,23 @@ with st.sidebar:
     sinifler = (
         df.dropna(subset=["Sinif"]).sort_values(["SinifNo", "Sinif"])["Sinif"].unique().tolist()
     )
-    no_col = df.dropna(subset=["Sinif"]).groupby("Sinif")["SinifNo"].first()
-    qrup_1_4 = "1-4 siniflər"
-    qrup_5_11 = "5-11 siniflər"
-    sec_raw = st.multiselect(
-        "Sinf",
-        [qrup_1_4, qrup_5_11] + sinifler,
-        default=[qrup_1_4, qrup_5_11],
-        help="Bütün siniflər: '1-4 siniflər' və '5-11 siniflər' seçili burax. Tək sinif seçmək üçün qrupların işarəsini söndürüb birini seç.",
-    )
-    sec_sinif = set(sec_raw)
-    sec_sinif.discard(qrup_1_4)
-    sec_sinif.discard(qrup_5_11)
-    if qrup_1_4 in sec_raw:
-        sec_sinif |= {s for s in sinifler if no_col[s] <= 4}
-    if qrup_5_11 in sec_raw:
-        sec_sinif |= {s for s in sinifler if no_col[s] >= 5}
+    st.markdown("**Sinf** (bütün siniflər seçilib)")
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("Hamısını seç", use_container_width=True):
+            for s in sinifler:
+                st.session_state[f"sinif_{s}"] = True
+            st.rerun()
+    with b2:
+        if st.button("Hamısını sil", use_container_width=True):
+            for s in sinifler:
+                st.session_state[f"sinif_{s}"] = False
+            st.rerun()
+    s_cols = st.columns(3)
+    for i, s in enumerate(sinifler):
+        with s_cols[i % 3]:
+            st.checkbox(s, value=True, key=f"sinif_{s}")
+    sec_sinif = {s for s in sinifler if st.session_state.get(f"sinif_{s}", True)}
 
     cinsler = ["Hamısı", "Oğlan", "Qız", "Naməlum"]
     sec_cins = st.segmented_control("Cins", cinsler, default="Hamısı")
