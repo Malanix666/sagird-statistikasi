@@ -189,7 +189,7 @@ with tab_umumi:
                 )
             )
             st.altair_chart(pie, width="stretch")
-            st.caption("Cins təxmindir: 1) soyad şəkilçisi (-ov/-yev oğlan, -ova/-yeva qız), 2) ad lüğəti (İlqar, Rza → oğlan; Aysel, Nüray → qız), 3) ad sonluğu (-a/-ə → qız).")
+            st.caption("Cins təxmindir: 1) soyad şəkilçisi (-ov/-yev oğlan, -ova/-yeva qız), 2) ad lüğəti (İlqar, Rza → oğlan; Aysel, Nuray → qız), 3) ad sonluğu (-a/-ə → qız).")
 
     with col2:
         with st.container(border=True):
@@ -302,6 +302,23 @@ with tab_siyah:
         view["Tevellud"] = [
             d.date() if pd.notna(d) else None for d in view["Tevellud"]
         ]
+        axtar = st.text_input(
+            "Axtar (ad, soyad, ata adı və ya sinif)",
+            placeholder="Məs: Rzayeva, Leyla və ya 5a",
+        )
+        if axtar.strip():
+            q = axtar.strip().casefold()
+            view["_axtar"] = (
+                view["Soyad"].fillna("")
+                + " "
+                + view["Ad"].fillna("")
+                + " "
+                + view["AtaAdi"].fillna("")
+                + " "
+                + view["Sinif"].fillna("")
+            ).str.casefold()
+            view = view[view["_axtar"].str.contains(q, na=False)].drop(columns=["_axtar"])
+        st.caption(f"{len(view)} şagird göstərilir")
         st.dataframe(
             view,
             column_config={
