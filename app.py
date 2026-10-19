@@ -18,6 +18,7 @@ from jurnal_data import (
     lesson_columns,
     lesson_days,
 )
+from jurnal_parse import closest, fold, match_students, parse_command
 from jurnal_store import (
     DEFAULT_BRANCH,
     DEFAULT_PATH,
@@ -120,6 +121,30 @@ def twin_count(df: pd.DataFrame) -> int:
     return int(ones.sum())
 
 
+@st.cache_data
+def class_names(df: pd.DataFrame) -> dict:
+    """sinif -> ['Soyad Ad AtaAdi', ...] (ünvanlar da daxil)"""
+    out = {}
+    for sinif, g in df.groupby("Sinif"):
+        saa = (
+            g["Soyad"].fillna("").astype(str).str.strip()
+            + " "
+            + g["Ad"].fillna("").astype(str).str.strip()
+            + " "
+            + g["AtaAdi"].fillna("").astype(str).str.strip()
+        ).str.strip()
+        seen, dedup = {}, []
+        for n in sorted(x for x in saa.tolist() if x):
+            if n in seen:
+                seen[n] += 1
+                n = "%s (%d)" % (n, seen[n])
+            else:
+                seen[n] = 1
+            dedup.append(n)
+        out[sinif] = dedup
+    return out
+
+
 def _to_xlsx(frame: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     frame.to_excel(buf, index=True)
@@ -147,6 +172,124 @@ def gh_config():
 
 
 df = load_data()
+CLASS_NAMES = class_names(df)
+
+
+def _lesson_period(sinif, d):
+    """Həmin tarixdə sinfin dərs periodu (yoxdursa None)."""
+    cols = lesson_columns(sinif, d, d)
+    return cols[0][1] if cols else None
+
+
+def _quick_apply(sinif, d, period, value, targets) -> str:
+    store = st.session_state.setdefault("jurnal_store", {})
+    changes = []
+    for n in targets:
+        key = (sinif, n, d.isoformat(), period)
+        changes.append((key, store.get(key)))
+        store[key] = value
+    st.session_state["jurnal_undo"] = {
+        "changes": changes,
+        "label": "%s · %s · %d nəfər → %s" % (sinif, d.strftime("%d.%m"), len(targets), value),
+    }
+    kim = ", ".join(t.split()[0] for t in targets[:5])
+    if len(targets) > 5:
+        kim += ", …"
+    return "%s · %d. dərs · **%s** → %s (%d nəfər)" % (
+        d.strftime("%d.%m.%Y"), period, value, kim, len(targets),
+    )
+
+
+def _quick_run(text, chosen=None, amb=None, switch=False) -> dict:
+    sinif_cur = st.session_state.get("jurnal_sinif")
+    parsed = parse_command(text, sinif_cur)
+    if parsed["errors"]:
+        return {"ok": False, "msg": " · ".join(parsed["errors"])}
+    sinif = parsed["sinif"] or sinif_cur
+    d, value = parsed["date"], parsed["value"]
+    if value is None:
+        return {"ok": False, "msg": "Dəyər tapılmadı — `qaib`, `yox idi`, `5`, `qiymət 4` yazın."}
+    if d is None:
+        return {"ok": False, "msg": "Tarix verilmədi — `bu gün`, `dünən` və ya `12.10.2026` yazın."}
+    period = _lesson_period(sinif, d)
+    if period is None:
+        return {
+            "ok": False,
+            "msg": "%s tarixində %s sinfində dərs yoxdur (tətil/bayram və ya həmin gün dərs deyil)."
+            % (d.strftime("%d.%m.%Y"), sinif),
+        }
+    names = CLASS_NAMES.get(sinif, [])
+    if not names:
+        return {"ok": False, "msg": "%s sinfində şagird siyahısı tapılmadı." % sinif}
+
+    if parsed["whole_class"]:
+        targets = list(names)
+    else:
+        queries = parsed["queries"]
+        if not queries:
+            return {"ok": False, "msg": "Şagird adı yazın (və ya `hamısı`)."}
+        targets = []
+        for q in queries:
+            if chosen and amb and q == amb:
+                targets.append(chosen)
+                continue
+            hits = match_students(q, names)
+            if not hits:
+                return {
+                    "ok": False,
+                    "msg": "`%s` — %s sinfində tapılmadı." % (q, sinif),
+                    "suggest": closest(q, names),
+                }
+            if len(hits) > 1:
+                return {
+                    "ok": False,
+                    "msg": "`%s` — %d nəfər uyğun gəlir, hansı?" % (q, len(hits)),
+                    "pending": {"text": text, "amb": q, "candidates": hits[:8]},
+                }
+            targets.append(hits[0])
+
+    if switch:
+        st.session_state["jurnal_sinif"] = sinif
+        js, je = st.session_state.get("jurnal_start"), st.session_state.get("jurnal_end")
+        if js and d < js:
+            st.session_state["jurnal_start"] = d
+        if je and d > je:
+            st.session_state["jurnal_end"] = d
+
+    return {"ok": True, "msg": _quick_apply(sinif, d, period, value, targets)}
+
+
+def _quick_submit():
+    text = (st.session_state.get("jurnal_quick") or "").strip()
+    st.session_state["jurnal_quick"] = ""
+    st.session_state["jurnal_result"] = None
+    st.session_state["jurnal_pending"] = None
+    if not text:
+        return
+    res = _quick_run(text, switch=True)
+    st.session_state["jurnal_result"] = res
+    st.session_state["jurnal_pending"] = res.get("pending")
+
+
+def _quick_pick(cand):
+    pend = st.session_state.get("jurnal_pending") or {}
+    st.session_state["jurnal_result"] = _quick_run(
+        pend.get("text", ""), chosen=cand, amb=pend.get("amb")
+    )
+    st.session_state["jurnal_pending"] = None
+
+
+def _quick_undo():
+    u = st.session_state.pop("jurnal_undo", None)
+    store = st.session_state.setdefault("jurnal_store", {})
+    if u:
+        for key, old in u["changes"]:
+            if old is None:
+                store.pop(key, None)
+            else:
+                store[key] = old
+    st.session_state["jurnal_result"] = None
+    st.session_state["jurnal_pending"] = None
 
 with st.sidebar:
     st.subheader("Filterlər")
@@ -421,6 +564,49 @@ with tab_jurnal:
     with j3:
         j_end = st.date_input("Son", value=SCHOOL_END, key="jurnal_end")
 
+    with st.container(border=True):
+        st.markdown("**Sürətli qeyd** — sətir yazın və Enter basın")
+        st.text_input(
+            "Sürətli qeyd",
+            key="jurnal_quick",
+            on_change=_quick_submit,
+            label_visibility="collapsed",
+            placeholder="bu gün 5a filankesov filankes qaib   ·   dünən 7b məmmədova aysel 5   ·   12.10.2026 5a hamısı qaib",
+        )
+        res = st.session_state.get("jurnal_result")
+        if res:
+            if res.get("ok"):
+                st.success(res["msg"])
+                u = st.session_state.get("jurnal_undo")
+                if u:
+                    st.button(
+                        "Ləğv et — %s" % u["label"],
+                        key="jurnal_undo_btn",
+                        on_click=_quick_undo,
+                    )
+            else:
+                st.error(res.get("msg", ""))
+                if res.get("suggest"):
+                    st.caption("Ən oxşarlar: " + ", ".join(res["suggest"]))
+                pend = st.session_state.get("jurnal_pending")
+                if pend and pend.get("candidates"):
+                    st.caption("Hansı şagirddir?")
+                    row = st.columns(min(len(pend["candidates"]), 4))
+                    for i, cand in enumerate(pend["candidates"]):
+                        with row[i % len(row)]:
+                            st.button(
+                                cand,
+                                key="jpend_%d" % i,
+                                use_container_width=True,
+                                on_click=_quick_pick,
+                                args=(cand,),
+                            )
+        else:
+            st.caption(
+                "Dəstəklənən: `bu gün` / `dünən` / `12.10.2026` · `5a` · şagird adı · "
+                "`qaib` / `yox idi` / `1`–`5` / `qiymət 4` · `hamısı` · `əliyev, məmmədov qaib`"
+            )
+
     slots = lesson_days(sinif_j)
     dows = sorted({DAY_TO_WEEKDAY[d] for d, _ in slots})
     st.caption(
@@ -431,29 +617,14 @@ with tab_jurnal:
 
     cols = lesson_columns(sinif_j, j_start, j_end)
 
-    sinif_df = df[df["Sinif"] == sinif_j]
-    saa = (
-        sinif_df["Soyad"].fillna("").astype(str).str.strip()
-        + " "
-        + sinif_df["Ad"].fillna("").astype(str).str.strip()
-        + " "
-        + sinif_df["AtaAdi"].fillna("").astype(str).str.strip()
-    ).str.strip()
-    saalar = sorted(x for x in saa.tolist() if x)
+    saalar = CLASS_NAMES.get(sinif_j, [])
 
     if not cols:
         st.info("Seçilmiş tarix aralığında bu sinifdə dərs yoxdur.")
     elif not saalar:
         st.info("Bu sinifdə şagird siyahısı yoxdur.")
     else:
-        seen, indeks = {}, []
-        for n in saalar:
-            if n in seen:
-                seen[n] += 1
-                n = "%s (%d)" % (n, seen[n])
-            else:
-                seen[n] = 1
-            indeks.append(n)
+        indeks = list(saalar)
 
         tarixler = [d for d, _ in cols]
         tekrar = {d for d in tarixler if tarixler.count(d) > 1}
