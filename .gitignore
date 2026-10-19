@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 .venv/
 venv/
+# GitHub tokenu heç vaxt repo-ya daxil etmə
+.streamlit/secrets.toml

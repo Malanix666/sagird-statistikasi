@@ -1,5 +1,6 @@
 import datetime
 import io
+import time
 
 import altair as alt
 import pandas as pd
@@ -16,6 +17,16 @@ from jurnal_data import (
     class_sort_key,
     lesson_columns,
     lesson_days,
+)
+from jurnal_store import (
+    DEFAULT_BRANCH,
+    DEFAULT_PATH,
+    DEFAULT_REPO,
+    deserialize as jurnal_from_github,
+    fetch as jurnal_fetch,
+    push as jurnal_push,
+    serialize as jurnal_to_github,
+    store_hash,
 )
 
 st.set_page_config(
@@ -113,6 +124,26 @@ def _to_xlsx(frame: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     frame.to_excel(buf, index=True)
     return buf.getvalue()
+
+
+def _sec(name, default=None):
+    try:
+        return st.secrets[name]
+    except Exception:
+        return default
+
+
+def gh_config():
+    """GitHub saxlama konfiqurasiyası. Token yoxdursa None."""
+    token = _sec("GITHUB_TOKEN")
+    if not token:
+        return None
+    return {
+        "token": str(token),
+        "repo": str(_sec("GITHUB_REPO", DEFAULT_REPO)),
+        "branch": str(_sec("GITHUB_BRANCH", DEFAULT_BRANCH)),
+        "path": str(_sec("GITHUB_PATH", DEFAULT_PATH)),
+    }
 
 
 df = load_data()
@@ -370,6 +401,14 @@ with tab_siyah:
 with tab_jurnal:
     st.subheader("Formativ qiymətləndirmə jurnalı")
 
+    gh_cfg = gh_config()
+    if gh_cfg and "jurnal_remote_done" not in st.session_state:
+        remote = jurnal_fetch(gh_cfg)
+        st.session_state["jurnal_remote_done"] = True
+        st.session_state["jurnal_remote_ok"] = remote is not None
+        if remote:
+            st.session_state["jurnal_store"] = jurnal_from_github(remote)
+
     j1, j2, j3 = st.columns([3, 2, 2])
     with j1:
         sinif_j = st.selectbox(
@@ -431,6 +470,7 @@ with tab_jurnal:
             columns=labels,
         )
         store = st.session_state.setdefault("jurnal_store", {})
+        st.session_state.setdefault("jurnal_saved_hash", store_hash(store))
         for (d, p), lb in zip(cols, labels):
             for n in indeks:
                 skel.at[n, lb] = store.get((sinif_j, n, d.isoformat(), p), "")
@@ -451,7 +491,12 @@ with tab_jurnal:
                 v = edited.at[n, lb]
                 if v is None or (isinstance(v, float) and pd.isna(v)):
                     v = ""
-                store[(sinif_j, n, d.isoformat(), p)] = str(v)
+                key = (sinif_j, n, d.isoformat(), p)
+                if str(v).strip():
+                    store[key] = str(v).strip()
+                else:
+                    # boş xana: dəyəri sil ki, GitHub-a da ötürülsün
+                    store.pop(key, None)
 
         f1, f2 = st.columns([1, 4])
         with f1:
@@ -461,5 +506,51 @@ with tab_jurnal:
                 file_name="formativ_jurnal_%s.xlsx" % sinif_j,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
+    store_all = st.session_state.setdefault("jurnal_store", {})
+    saved_hash = st.session_state.setdefault("jurnal_saved_hash", store_hash(store_all))
+    dirty = store_hash(store_all) != saved_hash
+
+    st.divider()
+    s1, s2, s3 = st.columns([3, 2, 3])
+    with s1:
+        if gh_cfg:
+            if st.button(
+                "GitHub-a saxla",
+                type="primary" if dirty else "secondary",
+                use_container_width=True,
+            ):
+                ok, msg = jurnal_push(gh_cfg, jurnal_to_github(store_all))
+                if ok:
+                    st.session_state["jurnal_saved_hash"] = store_hash(store_all)
+                    st.session_state["jurnal_last_save"] = time.strftime("%d.%m.%Y %H:%M:%S")
+                    st.success(msg)
+                else:
+                    st.error(msg)
+        else:
+            st.button(
+                "GitHub-a saxla (token yoxdur)",
+                disabled=True,
+                use_container_width=True,
+            )
+    with s2:
+        if st.session_state.get("jurnal_last_save"):
+            st.caption("Son saxlanış: %s" % st.session_state["jurnal_last_save"])
+        elif not gh_cfg:
+            st.caption("Token quraşdırılmayıb")
+        else:
+            st.caption("Saxlanılmayıb")
+    with s3:
+        if not gh_cfg:
+            st.warning(
+                "GitHub token yoxdur — qeydlər yalnız bu brauzer sessiyasında qalır. "
+                "`GITHUB_TOKEN` əlavə edin (secrets.example.toml baxın)."
+            )
+        elif not st.session_state.get("jurnal_remote_ok", True):
+            st.error("GitHub-dan əvvəlki qeydləri oxumaq mümkün olmadı — yoxlayın: token, repo adı, icazə.")
+        elif dirty:
+            st.warning("Saxlanılmamış dəyişikliklər var — **GitHub-a saxla** düyməsinə basın.")
+        else:
+            st.success("Bütün qeydlər GitHub-da saxlanılıb.")
 
 st.caption("Məlumat mənbəyi: H.Z.Tağıyev adına 123 №-li tam orta məktəb · 2026/2027 tədris ili")
