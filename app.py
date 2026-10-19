@@ -1,4 +1,5 @@
 import datetime
+import io
 
 import altair as alt
 import pandas as pd
@@ -6,6 +7,16 @@ import streamlit as st
 from pathlib import Path
 
 from az_names import MALE, FEMALE, norm
+from jurnal_data import (
+    CEDEVEL,
+    DAY_TO_WEEKDAY,
+    DOW_AZ,
+    SCHOOL_END,
+    SCHOOL_START,
+    class_sort_key,
+    lesson_columns,
+    lesson_days,
+)
 
 st.set_page_config(
     page_title="123 №-li məktəb — Şagird statistikası",
@@ -98,6 +109,12 @@ def twin_count(df: pd.DataFrame) -> int:
     return int(ones.sum())
 
 
+def _to_xlsx(frame: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    frame.to_excel(buf, index=True)
+    return buf.getvalue()
+
+
 df = load_data()
 
 with st.sidebar:
@@ -164,11 +181,12 @@ with st.container(horizontal=True):
     if namelum:
         st.metric("Naməlum cins", namelum, border=True)
 
-tab_umumi, tab_aile, tab_siyah = st.tabs(
+tab_umumi, tab_aile, tab_siyah, tab_jurnal = st.tabs(
     [
         ":material/bar_chart: Ümumi statistika",
         ":material/family_history: Ailələr",
         ":material/table_rows: Şagird siyahısı",
+        ":material/book: Formativ jurnal",
     ]
 )
 
@@ -348,5 +366,100 @@ with tab_siyah:
             hide_index=True,
             width="stretch",
         )
+
+with tab_jurnal:
+    st.subheader("Formativ qiymətləndirmə jurnalı")
+
+    j1, j2, j3 = st.columns([3, 2, 2])
+    with j1:
+        sinif_j = st.selectbox(
+            "Sinif",
+            sorted(CEDEVEL.keys(), key=class_sort_key),
+            key="jurnal_sinif",
+        )
+    with j2:
+        j_start = st.date_input("Başlanğıc", value=SCHOOL_START, key="jurnal_start")
+    with j3:
+        j_end = st.date_input("Son", value=SCHOOL_END, key="jurnal_end")
+
+    slots = lesson_days(sinif_j)
+    dows = sorted({DAY_TO_WEEKDAY[d] for d, _ in slots})
+    st.caption(
+        "Həftədə %d dərs: %s · tətil/bayram günləri avtomatik atlanır · "
+        "xanalara `qaib` və ya qiymət (1–5) yazın"
+        % (len(slots), ", ".join(DOW_AZ[w] for w in dows))
+    )
+
+    cols = lesson_columns(sinif_j, j_start, j_end)
+
+    sinif_df = df[df["Sinif"] == sinif_j]
+    saa = (
+        sinif_df["Soyad"].fillna("").astype(str).str.strip()
+        + " "
+        + sinif_df["Ad"].fillna("").astype(str).str.strip()
+        + " "
+        + sinif_df["AtaAdi"].fillna("").astype(str).str.strip()
+    ).str.strip()
+    saalar = sorted(x for x in saa.tolist() if x)
+
+    if not cols:
+        st.info("Seçilmiş tarix aralığında bu sinifdə dərs yoxdur.")
+    elif not saalar:
+        st.info("Bu sinifdə şagird siyahısı yoxdur.")
+    else:
+        seen, indeks = {}, []
+        for n in saalar:
+            if n in seen:
+                seen[n] += 1
+                n = "%s (%d)" % (n, seen[n])
+            else:
+                seen[n] = 1
+            indeks.append(n)
+
+        tarixler = [d for d, _ in cols]
+        tekrar = {d for d in tarixler if tarixler.count(d) > 1}
+        labels = []
+        for d, p in cols:
+            lb = "%d.%02d %s" % (d.day, d.month, DOW_AZ[d.weekday()])
+            if d in tekrar:
+                lb += " · %d" % p
+            labels.append(lb)
+
+        skel = pd.DataFrame(
+            "",
+            index=pd.Index(indeks, name="Şagirdin soyadı, adı, atasının adı"),
+            columns=labels,
+        )
+        store = st.session_state.setdefault("jurnal_store", {})
+        for (d, p), lb in zip(cols, labels):
+            for n in indeks:
+                skel.at[n, lb] = store.get((sinif_j, n, d.isoformat(), p), "")
+
+        wkey = "jed_%s_%s_%s" % (sinif_j, j_start.isoformat(), j_end.isoformat())
+        edited = st.data_editor(
+            skel,
+            key=wkey,
+            width="stretch",
+            hide_index=False,
+            column_config={
+                lb: st.column_config.TextColumn(lb, width="small") for lb in labels
+            },
+        )
+
+        for (d, p), lb in zip(cols, labels):
+            for n in indeks:
+                v = edited.at[n, lb]
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    v = ""
+                store[(sinif_j, n, d.isoformat(), p)] = str(v)
+
+        f1, f2 = st.columns([1, 4])
+        with f1:
+            st.download_button(
+                "Excel jurnalı yüklə",
+                data=_to_xlsx(edited),
+                file_name="formativ_jurnal_%s.xlsx" % sinif_j,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 st.caption("Məlumat mənbəyi: H.Z.Tağıyev adına 123 №-li tam orta məktəb · 2026/2027 tədris ili")
